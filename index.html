@@ -1,0 +1,812 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+  <title>Pong (Auto-First-Hit & Center Reset)</title>
+  <style>
+    :root { color-scheme: dark; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      background: radial-gradient(1100px 600px at 50% 50%, #0b1120 0%, #070b16 45%, #060913 100%);
+      color: #e2e8f0;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      display: grid;
+      place-items: center;
+    }
+    .wrap { display: grid; gap: 12px; place-items: center; }
+    canvas {
+      background: linear-gradient(180deg, rgba(9,13,24,0.9) 0%, rgba(6,9,17,0.9) 100%);
+      border: 2px solid #1f2937;
+      border-radius: 10px;
+      box-shadow: 0 20px 50px rgba(0,0,0,0.55), inset 0 0 0 1px rgba(255,255,255,0.03);
+      cursor: pointer;
+    }
+    .hud { display: flex; gap: 18px; align-items: center; justify-content: center; font-weight: 600; font-size: 14px; opacity: 0.92; user-select: none; }
+    .key { padding: 2px 8px; border: 1px solid #334155; border-bottom-width: 3px; border-radius: 6px; background: #0b1324; color: #e2e8f0; font-weight: 700; font-size: 12px; letter-spacing: 0.5px; }
+    .sep { opacity: 0.5; }
+    .speed-display { margin-top: 8px; font-size: 14px; opacity: 0.85; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <canvas id="game" width="920" height="540" aria-label="Pong"></canvas>
+    <div class="hud">
+      <span><span class="key">W</span>/<span class="key">S</span> Left</span>
+      <span class="sep">|</span>
+      <span><span class="key">L-Shift</span> Fire Left</span>
+      <span class="sep">|</span>
+      <span><span class="key">↑</span>/<span class="key">↓</span> Right</span>
+      <span class="sep">|</span>
+      <span><span class="key">R-Shift</span> Fire Right</span>
+      <span class="sep">|</span>
+      <span><span class="key">SPACE</span> Pause</span>
+      <span class="sep">|</span>
+      <span><span class="key">R</span> Reset</span>
+      <span class="sep">|</span>
+      <span><span class="key">C</span> Config</span>
+    </div>
+    <div id="speedDisplay" class="speed-display">Ball speed: 0.00 | Paddle speed: 6.20</div>
+  </div>
+
+  <script>
+  (() => {
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+    const speedDisplay = document.getElementById('speedDisplay');
+
+    const FIELD_COLOR = '#0f172a';
+    const NET_COLOR = '#204268';
+    const PADDLE_COLOR = '#93c5fd';
+    const BALL_COLOR = '#fca5a5';
+    const TEXT_COLOR = '#e2e8f0';
+
+    const WIDTH = canvas.width;
+    const HEIGHT = canvas.height;
+
+    // Game mode
+    let gameMode = null; // 'pvp' or 'cpu'
+    let showMenu = true;
+    let showConfig = false;
+    let selectedOption = 0; // 0 = Player vs Player, 1 = Player vs CPU
+    let configSelectedOption = 0; // 0-3 for different config options
+    
+    // Config settings
+    const config = {
+      initialBaseSpeed: 5.0, // starting ball speed
+      baseSpeedIncrement: 0.25, // increases by this amount every round
+      speedMultiplier: 1.01, // ball speed multiplier on paddle hit (1.01 = 1%)
+      paddleHitsPerBullet: 10, // both players get bullets every X paddle hits
+    };
+
+    // Paddles: base speed increases 1% whenever ball speed increases on paddle hit
+    const paddle = { 
+      baseWidth: 14,
+      leftWidth: 14,
+      rightWidth: 14,
+      baseHeight: 96,
+      leftHeight: 96,
+      rightHeight: 96,
+      baseSpeed: 6.2, 
+      speed: 6.2, 
+      leftVelocity: 0,
+      rightVelocity: 0
+    };
+    
+    // CPU AI
+    const cpu = {
+      reactionDelay: 150, // ms delay before reacting
+      lastReaction: 0,
+      targetY: HEIGHT / 2,
+      shootProbability: 0.3 // 30% chance to shoot when it has bullets
+    };
+    
+    // Cannon projectiles
+    const projectiles = [];
+    const projectileConfig = {
+      width: 6,
+      height: 3,
+      speed: 12,
+      cooldown: 1000 // milliseconds
+    };
+    let leftLastFire = 0;
+    let rightLastFire = 0;
+    
+    // Ball: base speed grows by config.baseSpeedIncrement each round; +config.speedMultiplier on every paddle hit
+    const ballConfig = { radius: 8, get baseSpeed() { return config.initialBaseSpeed; } };
+
+    const leftPlayerName = 'Left';
+    const rightPlayerName = 'Right';
+
+    const keys = new Set();
+    let paused = false;
+    let roundCount = 0; // number of points scored so far
+    let paddlesMoved = false; // track if any paddle has moved yet
+    let totalPaddleHits = 0; // total number of paddle hits
+
+    const state = {
+      leftY: 0,
+      rightY: 0,
+      ballX: WIDTH / 2,
+      ballY: HEIGHT / 2,
+      ballVX: 0,
+      ballVY: 0,
+      leftScore: 0,
+      rightScore: 0,
+      leftBullets: 0,
+      rightBullets: 0,
+      serveToRight: Math.random() < 0.5,
+    };
+
+    let isCountingDown = false;
+    let countdownStart = performance.now();
+    const COUNTDOWN_TOTAL_MS = 3000;
+
+    let isSkillIssue = false;
+    let skillIssueStart = 0;
+    const SKILL_ISSUE_MS = 3000;
+    const TAUNTS = [
+      'Get out!', 'Skill issue', 'Dumdum', 'Loooooser', 'DISAPPOINTMENT!',
+      'Stupid', 'Bad Boy!', 'Jammer joh!'
+    ];
+    let skillIssueText = '';
+
+    // Helpers
+    function centerPaddles(){
+      state.leftY = (HEIGHT - paddle.leftHeight) / 2;
+      state.rightY = (HEIGHT - paddle.rightHeight) / 2;
+      paddle.leftVelocity = 0;
+      paddle.rightVelocity = 0;
+    }
+    
+    function fireProjectile(isLeft) {
+      const now = performance.now();
+      if (isLeft && now - leftLastFire < projectileConfig.cooldown) return;
+      if (!isLeft && now - rightLastFire < projectileConfig.cooldown) return;
+      
+      if (isLeft) {
+        if (state.leftBullets <= 0) return; // No bullets available
+        state.leftBullets--;
+        leftLastFire = now;
+        projectiles.push({
+          x: 28 + paddle.leftWidth,
+          y: state.leftY + paddle.leftHeight / 2,
+          vx: projectileConfig.speed,
+          fromLeft: true
+        });
+      } else {
+        if (state.rightBullets <= 0) return; // No bullets available
+        state.rightBullets--;
+        rightLastFire = now;
+        projectiles.push({
+          x: WIDTH - 28 - paddle.rightWidth,
+          y: state.rightY + paddle.rightHeight / 2,
+          vx: -projectileConfig.speed,
+          fromLeft: false
+        });
+      }
+    }
+
+    // Serve the ball so that the *first interaction after a score will hit a paddle*
+    // We align the ball's Y to the receiving paddle's center and set VY=0, VX toward that paddle.
+    function resetBall(serveRight) {
+      state.ballX = WIDTH / 2;
+      // ensure paddles are centered before calculating serve vector
+      const targetY = serveRight ? (state.rightY + paddle.rightHeight / 2) : (state.leftY + paddle.leftHeight / 2);
+      state.ballY = targetY;
+
+      const dir = serveRight ? 1 : -1;
+      const speed = ballConfig.baseSpeed + roundCount * config.baseSpeedIncrement; // progressive rounds
+      state.ballVX = speed * dir;
+      state.ballVY = 0; // horizontal so it will intersect the paddle's center first
+    }
+
+    function startCountdown() {
+      state.ballX = WIDTH / 2;
+      state.ballY = HEIGHT / 2;
+      state.ballVX = 0;
+      state.ballVY = 0;
+      isCountingDown = true;
+      countdownStart = performance.now();
+    }
+
+    function resetGame() {
+      centerPaddles();
+      state.leftScore = 0;
+      state.rightScore = 0;
+      state.leftBullets = 0;
+      state.rightBullets = 0;
+      state.serveToRight = Math.random() < 0.5;
+      roundCount = 0;
+      totalPaddleHits = 0;
+      paddle.speed = paddle.baseSpeed;
+      paddle.leftWidth = paddle.baseWidth;
+      paddle.rightWidth = paddle.baseWidth;
+      paddle.leftHeight = paddle.baseHeight;
+      paddle.rightHeight = paddle.baseHeight;
+      projectiles.length = 0;
+      paddlesMoved = false;
+      showMenu = true;
+      showConfig = false;
+      gameMode = null;
+      selectedOption = 0;
+      paused = false;
+      isCountingDown = false;
+    }
+    
+    function startGame(mode) {
+      gameMode = mode;
+      showMenu = false;
+      startCountdown();
+    }
+
+    // Draw helpers
+    function drawBackground() {
+      ctx.fillStyle = FIELD_COLOR;
+      ctx.fillRect(0, 0, WIDTH, HEIGHT);
+      const g = ctx.createRadialGradient(WIDTH/2, HEIGHT/2, HEIGHT*0.1, WIDTH/2, HEIGHT/2, HEIGHT*0.9);
+      g.addColorStop(0, 'rgba(12,20,38,0)');
+      g.addColorStop(1, 'rgba(0,0,0,0.35)');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, WIDTH, HEIGHT);
+    }
+
+    function drawNet() {
+      ctx.strokeStyle = NET_COLOR;
+      ctx.lineWidth = 4;
+      ctx.setLineDash([10, 14]);
+      ctx.beginPath();
+      ctx.moveTo(WIDTH/2, 20);
+      ctx.lineTo(WIDTH/2, HEIGHT - 20);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    function drawScores() {
+      ctx.fillStyle = TEXT_COLOR;
+      ctx.textBaseline = 'top';
+      
+      // Left side
+      ctx.font = 'bold 28px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto';
+      ctx.textAlign = 'left';
+      ctx.fillText(`Points: ${state.leftScore}`, 20, 16);
+      ctx.fillText(`Bullets: ${state.leftBullets}`, 20, 50);
+      
+      // Right side
+      ctx.textAlign = 'right';
+      ctx.fillText(`Points: ${state.rightScore}`, WIDTH - 20, 16);
+      ctx.fillText(`Bullets: ${state.rightBullets}`, WIDTH - 20, 50);
+      
+      // Center - Total Paddle Hits
+      ctx.font = 'bold 26px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto';
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#fde047';
+      ctx.fillText(`Paddle Hits: ${totalPaddleHits}`, WIDTH / 2, 50);
+      ctx.fillStyle = TEXT_COLOR;
+    }
+
+    function drawPaddles() {
+      ctx.fillStyle = PADDLE_COLOR;
+      ctx.fillRect(28, state.leftY, paddle.leftWidth, paddle.leftHeight);
+      ctx.fillRect(WIDTH - 28 - paddle.rightWidth, state.rightY, paddle.rightWidth, paddle.rightHeight);
+      
+      // Draw cannon indicators
+      ctx.fillStyle = '#fde047';
+      ctx.fillRect(28 + paddle.leftWidth - 2, state.leftY + paddle.leftHeight / 2 - 4, 4, 8);
+      ctx.fillRect(WIDTH - 28 - paddle.rightWidth - 2, state.rightY + paddle.rightHeight / 2 - 4, 4, 8);
+    }
+    
+    function drawProjectiles() {
+      ctx.fillStyle = '#fde047';
+      for (const proj of projectiles) {
+        ctx.fillRect(proj.x - projectileConfig.width / 2, proj.y - projectileConfig.height / 2, 
+                     projectileConfig.width, projectileConfig.height);
+      }
+    }
+
+    function drawBall() {
+      ctx.fillStyle = BALL_COLOR;
+      ctx.beginPath();
+      ctx.arc(state.ballX, state.ballY, ballConfig.radius, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    function drawMenu() {
+      if (!showMenu) return;
+      
+      ctx.fillStyle = 'rgba(2,6,23,0.85)';
+      ctx.fillRect(0, 0, WIDTH, HEIGHT);
+      
+      ctx.fillStyle = TEXT_COLOR;
+      ctx.font = 'bold 64px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('PONG', WIDTH / 2, HEIGHT / 2 - 120);
+      
+      ctx.font = 'bold 32px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto';
+      
+      // Option 1: Player vs Player
+      if (selectedOption === 0) {
+        ctx.fillStyle = '#93c5fd';
+        ctx.fillRect(WIDTH / 2 - 200, HEIGHT / 2 - 20, 400, 60);
+        ctx.fillStyle = '#0f172a';
+      } else {
+        ctx.fillStyle = TEXT_COLOR;
+      }
+      ctx.fillText('Player vs Player', WIDTH / 2, HEIGHT / 2 + 10);
+      
+      // Option 2: Player vs CPU
+      if (selectedOption === 1) {
+        ctx.fillStyle = '#93c5fd';
+        ctx.fillRect(WIDTH / 2 - 200, HEIGHT / 2 + 60, 400, 60);
+        ctx.fillStyle = '#0f172a';
+      } else {
+        ctx.fillStyle = TEXT_COLOR;
+      }
+      ctx.fillText('Player vs CPU', WIDTH / 2, HEIGHT / 2 + 90);
+      
+      ctx.fillStyle = TEXT_COLOR;
+      ctx.font = '18px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto';
+      ctx.fillText('Use ↑/↓ or W/S to select, ENTER or SPACE to start', WIDTH / 2, HEIGHT / 2 + 180);
+      ctx.fillText('Press C for Config', WIDTH / 2, HEIGHT / 2 + 210);
+    }
+
+    function drawConfig() {
+      if (!showConfig) return;
+      
+      ctx.fillStyle = 'rgba(2,6,23,0.85)';
+      ctx.fillRect(0, 0, WIDTH, HEIGHT);
+      
+      ctx.fillStyle = TEXT_COLOR;
+      ctx.font = 'bold 48px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('CONFIG', WIDTH / 2, 80);
+      
+      ctx.font = '22px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto';
+      
+      // Option 0: Initial Base Speed
+      const y0 = 150;
+      if (configSelectedOption === 0) {
+        ctx.fillStyle = '#93c5fd';
+        ctx.fillRect(WIDTH / 2 - 300, y0 - 22, 600, 44);
+        ctx.fillStyle = '#0f172a';
+      } else {
+        ctx.fillStyle = TEXT_COLOR;
+      }
+      ctx.textAlign = 'left';
+      ctx.fillText('Initial Base Speed:', WIDTH / 2 - 280, y0);
+      ctx.textAlign = 'right';
+      ctx.fillText(config.initialBaseSpeed.toFixed(1), WIDTH / 2 + 280, y0);
+      
+      // Option 1: Base Speed Increment
+      const y1 = 200;
+      if (configSelectedOption === 1) {
+        ctx.fillStyle = '#93c5fd';
+        ctx.fillRect(WIDTH / 2 - 300, y1 - 22, 600, 44);
+        ctx.fillStyle = '#0f172a';
+      } else {
+        ctx.fillStyle = TEXT_COLOR;
+      }
+      ctx.textAlign = 'left';
+      ctx.fillText('Base Speed Increase per Round:', WIDTH / 2 - 280, y1);
+      ctx.textAlign = 'right';
+      ctx.fillText(config.baseSpeedIncrement.toFixed(1), WIDTH / 2 + 280, y1);
+      
+      // Option 2: Speed Multiplier
+      const y2 = 250;
+      if (configSelectedOption === 2) {
+        ctx.fillStyle = '#93c5fd';
+        ctx.fillRect(WIDTH / 2 - 300, y2 - 22, 600, 44);
+        ctx.fillStyle = '#0f172a';
+      } else {
+        ctx.fillStyle = TEXT_COLOR;
+      }
+      ctx.textAlign = 'left';
+      const multiplierPercent = ((config.speedMultiplier - 1) * 100).toFixed(0);
+      ctx.fillText('Speed Increase per Paddle Hit:', WIDTH / 2 - 280, y2);
+      ctx.textAlign = 'right';
+      ctx.fillText(`${multiplierPercent}% (×${config.speedMultiplier.toFixed(3)})`, WIDTH / 2 + 280, y2);
+      
+      // Option 3: Paddle Hits Per Bullet
+      const y3 = 300;
+      if (configSelectedOption === 3) {
+        ctx.fillStyle = '#93c5fd';
+        ctx.fillRect(WIDTH / 2 - 300, y3 - 22, 600, 44);
+        ctx.fillStyle = '#0f172a';
+      } else {
+        ctx.fillStyle = TEXT_COLOR;
+      }
+      ctx.textAlign = 'left';
+      ctx.fillText('Bullets Every N Paddle Hits (Both Players):', WIDTH / 2 - 280, y3);
+      ctx.textAlign = 'right';
+      ctx.fillText(config.paddleHitsPerBullet.toString(), WIDTH / 2 + 280, y3);
+      
+      ctx.fillStyle = TEXT_COLOR;
+      ctx.font = '16px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto';
+      ctx.textAlign = 'center';
+      ctx.fillText('Use ↑/↓ to select, ←/→ to adjust values', WIDTH / 2, 430);
+      ctx.fillText('Press ENTER to confirm and reset game, ESC to cancel', WIDTH / 2, 455);
+      ctx.font = '14px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto';
+      ctx.fillText('Note: Players get 1 bullet when they score a point', WIDTH / 2, 480);
+    }
+
+    function drawCountdown() {
+      if (!isCountingDown) return;
+      const now = performance.now();
+      const elapsed = now - countdownStart;
+      const remaining = COUNTDOWN_TOTAL_MS - elapsed;
+      if (remaining <= 0) {
+        isCountingDown = false;
+        // paddles centered on serve and ball aimed to hit receiving paddle first
+        resetBall(state.serveToRight);
+        return;
+      }
+      const value = Math.ceil(remaining / 1000);
+      ctx.fillStyle = 'rgba(2,6,23,0.55)';
+      ctx.fillRect(0, 0, WIDTH, HEIGHT);
+      ctx.fillStyle = TEXT_COLOR;
+      ctx.font = 'bold 96px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(String(value), WIDTH / 2, HEIGHT / 2);
+    }
+
+    function drawSkillIssue() {
+      if (!isSkillIssue) return;
+      const now = performance.now();
+      const elapsed = now - skillIssueStart;
+      if (elapsed >= SKILL_ISSUE_MS) {
+        isSkillIssue = false;
+        startCountdown();
+        return;
+      }
+      const phase = Math.floor(elapsed / 150) % 2;
+      ctx.fillStyle = phase === 0 ? 'rgba(120,15,15,0.60)' : 'rgba(200,30,30,0.35)';
+      ctx.fillRect(0, 0, WIDTH, HEIGHT);
+      ctx.fillStyle = phase === 0 ? '#ffdddd' : '#ffffff';
+      ctx.font = 'bold 64px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(skillIssueText, WIDTH / 2, HEIGHT / 2);
+    }
+
+    // Movement
+    function updatePaddles() {
+      const accel = 0.4; // approach to target vel
+      const friction = 0.85; // smooth stop
+
+      let leftTargetVel = 0;
+      if (keys.has('KeyW')) {
+        leftTargetVel = -paddle.speed;
+        paddlesMoved = true;
+      }
+      if (keys.has('KeyS')) {
+        leftTargetVel = paddle.speed;
+        paddlesMoved = true;
+      }
+      paddle.leftVelocity += (leftTargetVel - paddle.leftVelocity) * accel;
+      paddle.leftVelocity *= friction;
+      state.leftY += paddle.leftVelocity;
+
+      // Right paddle control (player or CPU)
+      if (gameMode === 'cpu') {
+        updateCPU();
+      } else {
+        let rightTargetVel = 0;
+        if (keys.has('ArrowUp')) {
+          rightTargetVel = -paddle.speed;
+          paddlesMoved = true;
+        }
+        if (keys.has('ArrowDown')) {
+          rightTargetVel = paddle.speed;
+          paddlesMoved = true;
+        }
+        paddle.rightVelocity += (rightTargetVel - paddle.rightVelocity) * accel;
+        paddle.rightVelocity *= friction;
+        state.rightY += paddle.rightVelocity;
+      }
+
+      state.leftY = Math.max(0, Math.min(HEIGHT - paddle.leftHeight, state.leftY));
+      state.rightY = Math.max(0, Math.min(HEIGHT - paddle.rightHeight, state.rightY));
+    }
+    
+    function updateCPU() {
+      const now = performance.now();
+      
+      // Update target with reaction delay
+      if (now - cpu.lastReaction > cpu.reactionDelay) {
+        cpu.targetY = state.ballY;
+        cpu.lastReaction = now;
+        
+        // CPU shooting logic
+        if (state.rightBullets > 0 && Math.random() < cpu.shootProbability / 60) {
+          fireProjectile(false);
+        }
+      }
+      
+      const paddleCenter = state.rightY + paddle.rightHeight / 2;
+      const diff = cpu.targetY - paddleCenter;
+      
+      let targetVel = 0;
+      if (Math.abs(diff) > 5) {
+        targetVel = diff > 0 ? paddle.speed * 0.85 : -paddle.speed * 0.85;
+        paddlesMoved = true;
+      }
+      
+      const accel = 0.3;
+      const friction = 0.88;
+      paddle.rightVelocity += (targetVel - paddle.rightVelocity) * accel;
+      paddle.rightVelocity *= friction;
+      state.rightY += paddle.rightVelocity;
+    }
+    
+    function updateProjectiles() {
+      for (let i = projectiles.length - 1; i >= 0; i--) {
+        const proj = projectiles[i];
+        proj.x += proj.vx;
+        
+        // Check collision with right paddle (projectile from left)
+        if (proj.fromLeft) {
+          const rightPaddleX = WIDTH - 28 - paddle.rightWidth;
+          if (proj.x >= rightPaddleX && proj.x <= rightPaddleX + paddle.rightWidth) {
+            if (proj.y >= state.rightY && proj.y <= state.rightY + paddle.rightHeight) {
+              const oldHeight = paddle.rightHeight;
+              paddle.rightHeight = Math.max(20, paddle.rightHeight * 0.9);
+              // Adjust paddle position to keep it centered when shrinking
+              state.rightY += (oldHeight - paddle.rightHeight) / 2;
+              projectiles.splice(i, 1);
+              continue;
+            }
+          }
+        } 
+        // Check collision with left paddle (projectile from right)
+        else {
+          const leftPaddleX = 28;
+          if (proj.x >= leftPaddleX && proj.x <= leftPaddleX + paddle.leftWidth) {
+            if (proj.y >= state.leftY && proj.y <= state.leftY + paddle.leftHeight) {
+              const oldHeight = paddle.leftHeight;
+              paddle.leftHeight = Math.max(20, paddle.leftHeight * 0.9);
+              // Adjust paddle position to keep it centered when shrinking
+              state.leftY += (oldHeight - paddle.leftHeight) / 2;
+              projectiles.splice(i, 1);
+              continue;
+            }
+          }
+        }
+        
+        // Remove if off screen
+        if (proj.x < -20 || proj.x > WIDTH + 20) {
+          projectiles.splice(i, 1);
+        }
+      }
+    }
+
+    function updateBall() {
+      state.ballX += state.ballVX;
+      state.ballY += state.ballVY;
+
+      if (state.ballY <= ballConfig.radius) { state.ballY = ballConfig.radius; state.ballVY *= -1; }
+      else if (state.ballY >= HEIGHT - ballConfig.radius) { state.ballY = HEIGHT - ballConfig.radius; state.ballVY *= -1; }
+
+      const leftX = 28 + paddle.leftWidth;
+      const rightX = WIDTH - 28 - paddle.rightWidth;
+
+      // Left paddle collision
+      if (state.ballX - ballConfig.radius <= leftX && state.ballX - ballConfig.radius >= leftX - Math.abs(state.ballVX) - 2) {
+        if (state.ballY >= state.leftY && state.ballY <= state.leftY + paddle.leftHeight) {
+          state.ballX = leftX + ballConfig.radius;
+          let hitPos = (state.ballY - state.leftY) / paddle.leftHeight - 0.5;
+          // Add slight random deflection if hit near center
+          if (Math.abs(hitPos) < 0.15) {
+            hitPos += (Math.random() - 0.5) * 0.3;
+          }
+          const angle = hitPos * (Math.PI / 2.6);
+          let speed = Math.hypot(state.ballVX, state.ballVY);
+          // Only increase speed if paddles have been moved
+          if (paddlesMoved) {
+            speed *= config.speedMultiplier;
+            paddle.speed *= 1.01; // paddles +1% when ball speeds up
+          }
+          state.ballVX = Math.cos(angle) * speed;
+          state.ballVY = Math.sin(angle) * speed;
+          // Add paddle velocity effect (spin)
+          state.ballVY += paddle.leftVelocity * 0.35;
+          totalPaddleHits++; // Increment paddle hit counter
+        }
+      }
+
+      // Right paddle collision
+      if (state.ballX + ballConfig.radius >= rightX && state.ballX + ballConfig.radius <= rightX + Math.abs(state.ballVX) + 2) {
+        if (state.ballY >= state.rightY && state.ballY <= state.rightY + paddle.rightHeight) {
+          state.ballX = rightX - ballConfig.radius;
+          let hitPos = (state.ballY - state.rightY) / paddle.rightHeight - 0.5;
+          // Add slight random deflection if hit near center
+          if (Math.abs(hitPos) < 0.15) {
+            hitPos += (Math.random() - 0.5) * 0.3;
+          }
+          const angle = hitPos * (Math.PI / 2.6);
+          let speed = Math.hypot(state.ballVX, state.ballVY);
+          // Only increase speed if paddles have been moved
+          if (paddlesMoved) {
+            speed *= config.speedMultiplier;
+            paddle.speed *= 1.01; // paddles +1% when ball speeds up
+          }
+          state.ballVX = -Math.cos(angle) * speed;
+          state.ballVY = Math.sin(angle) * speed;
+          // Add paddle velocity effect (spin)
+          state.ballVY += paddle.rightVelocity * 0.35;
+          totalPaddleHits++; // Increment paddle hit counter
+        }
+      }
+
+      const ballSpeed = Math.hypot(state.ballVX, state.ballVY);
+      speedDisplay.textContent = `Ball speed: ${ballSpeed.toFixed(2)} | Paddle speed: ${paddle.speed.toFixed(2)}`;
+
+      // Check if we should award bullets for paddle hits (based on config)
+      if (totalPaddleHits > 0 && totalPaddleHits % config.paddleHitsPerBullet === 0) {
+        state.leftBullets += 1;
+        state.rightBullets += 1;
+      }
+
+      // Scoring
+      if (state.ballX < -20) {
+        state.rightScore += 1;
+        // Award bullet to the scorer
+        state.rightBullets += 1;
+        
+        state.serveToRight = false;
+        roundCount++;
+        centerPaddles(); // center paddles after a score
+        paddlesMoved = false; // reset for next round
+        // freeze ball and show banner
+        state.ballX = WIDTH / 2; state.ballY = HEIGHT / 2; state.ballVX = 0; state.ballVY = 0;
+        const taunt = TAUNTS[Math.floor(Math.random() * TAUNTS.length)];
+        skillIssueText = `${leftPlayerName}: ${taunt}`;
+        isCountingDown = false;
+        isSkillIssue = true;
+        skillIssueStart = performance.now();
+        return; // Prevent further updates this frame
+      } else if (state.ballX > WIDTH + 20) {
+        state.leftScore += 1;
+        // Award bullet to the scorer
+        state.leftBullets += 1;
+        
+        state.serveToRight = true;
+        roundCount++;
+        centerPaddles(); // center paddles after a score
+        paddlesMoved = false; // reset for next round
+        state.ballX = WIDTH / 2; state.ballY = HEIGHT / 2; state.ballVX = 0; state.ballVY = 0;
+        const taunt = TAUNTS[Math.floor(Math.random() * TAUNTS.length)];
+        skillIssueText = `${rightPlayerName}: ${taunt}`;
+        isCountingDown = false;
+        isSkillIssue = true;
+        skillIssueStart = performance.now();
+        return; // Prevent further updates this frame
+      }
+    }
+
+    function frame() {
+      drawBackground();
+      drawNet();
+      
+      if (showConfig) {
+        drawConfig();
+      } else if (showMenu) {
+        drawMenu();
+      } else {
+        drawScores();
+        drawPaddles();
+        drawBall();
+        drawProjectiles();
+        drawCountdown();
+        drawSkillIssue();
+        
+        if (!paused && !isCountingDown && !isSkillIssue) { 
+          updatePaddles(); 
+          updateBall(); 
+          updateProjectiles();
+        }
+      }
+      
+      requestAnimationFrame(frame);
+    }
+
+    // Input
+    addEventListener('keydown', (e) => {
+      if (showConfig) {
+        // Config screen controls
+        if (e.code === 'ArrowUp') {
+          configSelectedOption = Math.max(0, configSelectedOption - 1);
+          e.preventDefault();
+        }
+        if (e.code === 'ArrowDown') {
+          configSelectedOption = Math.min(3, configSelectedOption + 1);
+          e.preventDefault();
+        }
+        if (e.code === 'ArrowLeft') {
+          if (configSelectedOption === 0) {
+            config.initialBaseSpeed = Math.max(1.0, config.initialBaseSpeed - 0.5);
+          } else if (configSelectedOption === 1) {
+            config.baseSpeedIncrement = Math.max(0.0, config.baseSpeedIncrement - 0.1);
+          } else if (configSelectedOption === 2) {
+            config.speedMultiplier = Math.max(1.001, config.speedMultiplier - 0.01);
+          } else if (configSelectedOption === 3) {
+            config.paddleHitsPerBullet = Math.max(1, config.paddleHitsPerBullet - 1);
+          }
+          e.preventDefault();
+        }
+        if (e.code === 'ArrowRight') {
+          if (configSelectedOption === 0) {
+            config.initialBaseSpeed = Math.min(15.0, config.initialBaseSpeed + 0.5);
+          } else if (configSelectedOption === 1) {
+            config.baseSpeedIncrement = Math.min(3.0, config.baseSpeedIncrement + 0.1);
+          } else if (configSelectedOption === 2) {
+            config.speedMultiplier = Math.min(1.2, config.speedMultiplier + 0.01);
+          } else if (configSelectedOption === 3) {
+            config.paddleHitsPerBullet = Math.min(50, config.paddleHitsPerBullet + 1);
+          }
+          e.preventDefault();
+        }
+        if (e.code === 'Enter') {
+          showConfig = false;
+          resetGame();
+          e.preventDefault();
+        }
+        if (e.code === 'Escape') {
+          showConfig = false;
+          e.preventDefault();
+        }
+      } else if (showMenu) {
+        if (e.code === 'ArrowUp' || e.code === 'KeyW') {
+          selectedOption = Math.max(0, selectedOption - 1);
+          e.preventDefault();
+        }
+        if (e.code === 'ArrowDown' || e.code === 'KeyS') {
+          selectedOption = Math.min(1, selectedOption + 1);
+          e.preventDefault();
+        }
+        if (e.code === 'Enter' || e.code === 'Space') {
+          startGame(selectedOption === 0 ? 'pvp' : 'cpu');
+          e.preventDefault();
+        }
+        if (e.code === 'KeyC') {
+          showMenu = false;
+          showConfig = true;
+          configSelectedOption = 0;
+          e.preventDefault();
+        }
+      } else {
+        if (['KeyW','KeyS','ArrowUp','ArrowDown'].includes(e.code)) { keys.add(e.code); e.preventDefault(); }
+        if (e.code === 'Space') { paused = !paused; e.preventDefault(); }
+        if (e.code === 'KeyR') { resetGame(); e.preventDefault(); }
+        if (e.code === 'KeyC') { 
+          showConfig = true;
+          configSelectedOption = 0;
+          paused = true;
+          e.preventDefault(); 
+        }
+        if (e.code === 'ShiftLeft') { fireProjectile(true); e.preventDefault(); }
+        if (e.code === 'ShiftRight' && gameMode === 'pvp') { fireProjectile(false); e.preventDefault(); }
+      }
+    }, { passive: false });
+    
+    addEventListener('keyup', (e) => {
+      if (['KeyW','KeyS','ArrowUp','ArrowDown'].includes(e.code)) { keys.delete(e.code); e.preventDefault(); }
+    }, { passive: false });
+
+    // Init
+    centerPaddles();
+    paddle.leftWidth = paddle.baseWidth;
+    paddle.rightWidth = paddle.baseWidth;
+    paddle.leftHeight = paddle.baseHeight;
+    paddle.rightHeight = paddle.baseHeight;
+    requestAnimationFrame(frame);
+  })();
+  </script>
+</body>
+</html>
